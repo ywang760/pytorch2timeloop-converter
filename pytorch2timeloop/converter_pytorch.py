@@ -2,14 +2,15 @@
 
 import logging
 import os
+from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
 import torch
-from torch import nn
 import torch.fx as fx
-
 import yaml
+from rich.progress import Progress
+from torch import nn
 
 from pytorch2timeloop.utils.interpreter import Converter
 
@@ -46,11 +47,18 @@ def convert_model_with_sample_input(model: nn.Module,
     _convert_from_layer_data(layer_data, model_name, save_dir)
 
 
-def convert_model(model: nn.Module, input_size: tuple, batch_size: int,
-                  model_name: str, save_dir: Path,
-                  fuse=False, convert_fc=False,
-                  ignored_func=None,
-                  exception_module_names=()):
+def convert_model(
+    model: nn.Module,
+    input_size: tuple,
+    batch_size: int,
+    model_name: str,
+    save_dir: Path,
+    fuse=False,
+    convert_fc=False,
+    ignored_func=None,
+    ignored_modules=None,
+    exception_module_names=(),
+):
     """
     Convert a PyTorch CNN model to Timeloop problem files.
 
@@ -75,8 +83,10 @@ def convert_model(model: nn.Module, input_size: tuple, batch_size: int,
             model_name
         )
     )
-    sample_input = torch.rand(2, *input_size).type(torch.FloatTensor)
-    layer_data = _make_summary(model, sample_input, ignored_func=ignored_func)
+    sample_input = torch.rand(batch_size, *input_size).type(torch.FloatTensor)
+    layer_data = _make_summary(
+        model, sample_input, ignored_func=ignored_func, ignored_modules=ignored_modules
+    )
     _convert_from_layer_data(layer_data, model_name, save_dir, exception_module_names, fuse=fuse)
 
 
@@ -89,7 +99,12 @@ def _convert_from_layer_data(layer_data, model_name, save_dir, exception_module_
             e.lower() in p.name.lower() or 
             e.lower() in p.__class__.__name__.lower() 
             for e in exception_module_names)]
+    logger.info(f"Number of layers: {len(layer_data)}")
+    type_counts = defaultdict(int)
     if fuse:
+        raise NotImplementedError(
+            "Fusing is not supported yet, need to fix file naming problem"
+        )
         problems = []
         for i in range(0, len(layer_data)):
             problem = layer_data[i]
@@ -104,16 +119,29 @@ def _convert_from_layer_data(layer_data, model_name, save_dir, exception_module_
             ))
     else:
         # make the problem file for each layer
-        for i in range(0, len(layer_data)):
-            problem = layer_data[i]
-            file_name = '[layer' + str(i+1) + ']' + problem.name + '.yaml'
-            file_path = os.path.abspath(os.path.join(save_dir, model_name, file_name))
-            with open(file_path, 'w') as f:
-                f.write(yaml.dump(problem.to_yaml()))
+
+        with Progress() as progress:
+            task = progress.add_task("Processing...", total=len(layer_data))
+            for i in range(len(layer_data)):
+                progress.update(task, advance=1)
+                problem = layer_data[i]
+                type = problem.type
+                type_counts[type] += 1
+                file_name = f"{type}_{type_counts[type]}.yaml"
+                file_path = os.path.abspath(
+                    os.path.join(save_dir, model_name, file_name)
+                )
+                with open(file_path, "w") as f:
+                    f.write(yaml.dump(problem.to_yaml()))
 
     logger.info("conversion complete!\n")
 
-def _make_summary(model, sample_input, ignored_func):
-    converter = Converter(fx.symbolic_trace(model), ignored_func=ignored_func)
+
+def _make_summary(model, sample_input, ignored_func, ignored_modules):
+    converter = Converter(
+        fx.symbolic_trace(model),
+        ignored_func=ignored_func,
+        ignored_modules=ignored_modules,
+    )
     converter.run(sample_input)
     return converter.summary

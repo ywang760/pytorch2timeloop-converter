@@ -4,17 +4,18 @@ import operator
 from typing import Dict, Tuple, Union
 
 import torch
-from torch import nn
-import torch.nn.functional as F
 import torch.fx as fx
+import torch.nn.functional as F
+from torch import nn
 
-from .converter import generate_description, generate_matmul_func
 from pytorch2timeloop.utils.layer_descriptions import (
     BinaryElementwiseFuncDescription,
-    SoftmaxFuncDescription,
     MaxPoolLayerDescription,
-    ViewFuncDescription
+    SoftmaxFuncDescription,
+    ViewFuncDescription,
 )
+
+from .converter import generate_description, generate_matmul_func
 
 logger = logging.getLogger(__name__)
 
@@ -27,7 +28,8 @@ class Converter(fx.Interpreter):
         nn.Hardsigmoid,
         nn.Hardswish,
         nn.ReLU,
-        nn.ReLU6
+        nn.ReLU6,
+        nn.GELU,
     )
 
     DEFAULT_IGNORED_MODULES = tuple()
@@ -92,12 +94,14 @@ class Converter(fx.Interpreter):
                     original_args: tuple):
         result = super().call_module(target, args, kwargs)
         module = self.name_to_module[target]
+        logger.info("running module %s[type=%s]", name, module)
 
         if isinstance(module, self.ignored_modules):
             logger.warning('ignoring module %s[type=%s]', name, module)
             return result
 
         if isinstance(module, self.bypassed_modules):
+            logger.warning('bypassing module %s[type=%s]', name, module)
             self.bypassed_arg_remap[f'{name}_out'] = \
                 f'{original_args[0].name}_out'
             return result
@@ -108,14 +112,16 @@ class Converter(fx.Interpreter):
 
         description = generate_description(module, args[0], result, name,
                                            arg_name)
+        description.type = module.__class__.__name__
 
         self.summary.append(description)
 
         return result
-    
+
     def call_function(self, target, args, kwargs, name: str,
                       original_args: tuple):
         result = super().call_function(target, args, kwargs)
+        logger.info("running function %s[type=%s]", name, target)
 
         arg_names = []
         for arg in original_args:
@@ -166,6 +172,7 @@ class Converter(fx.Interpreter):
                 ifmap_name=arg_names[0],
                 ofmap_name=f'{name}_out'
             )
+            description.type = target.__name__
             self.summary.append(description)
         elif target == torch.matmul:
             description = generate_matmul_func(
